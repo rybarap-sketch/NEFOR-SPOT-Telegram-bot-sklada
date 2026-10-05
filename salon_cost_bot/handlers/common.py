@@ -47,18 +47,20 @@ async def cancel(message: Message, state: FSMContext, settings: Settings) -> Non
         "Действие отменено. Данные не изменены.",
         reply_markup=home_keyboard(settings, message.from_user.id if message.from_user else None),
     )
+async def go_home(
+        callback: CallbackQuery,
+        state: FSMContext,
+        settings: Settings,
+    ) -> None:
+        await state.clear()
 
+        if callback.message:
+            await callback.message.answer(
+                "Главное меню",
+                reply_markup=home_keyboard(settings, callback.from_user.id),
+            )
 
-async def go_home(callback: CallbackQuery, state: FSMContext, settings: Settings) -> None:
-    await state.clear()
-    if callback.message:
-        await callback.message.answer(
-            "Главное меню",
-            reply_markup=home_keyboard(
-                settings, callback.from_user.id if callback.from_user else None
-            ),
-        )
-    await safe_answer(callback)
+        await safe_answer(callback)
 
 
 async def safe_answer(callback: CallbackQuery, text: str | None = None) -> None:
