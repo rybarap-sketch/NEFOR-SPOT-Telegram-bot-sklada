@@ -1,45 +1,57 @@
-# [Project name]
+# NEFOR SPOT Telegram bot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+Асинхронный Telegram-бот для калькуляции расходников и внутреннего складского учёта парикмахерской NEFOR SPOT.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- Workflow `NEFOR SPOT Telegram Bot` — единственный polling-процесс Telegram.
+- `uv run python -m unittest discover -s tests -v` — автоматические тесты с временной базой.
+- Required secret: `BOT_TOKEN` — Replit Secrets only.
+- Optional env: `ADMIN_USER_ID`, `DATABASE_PATH` (default `data/nefor_spot.sqlite3`), SQLite `DATABASE_URL`, `APP_ENV`, `LOG_LEVEL`.
+- Production: Reserved VM / VM Deployment with one always-running worker and persistent storage; do not use Autoscale for long polling.
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Python 3.11, aiogram 3.x, aiosqlite, SQLite.
+- Telegram handlers call the service layer; inventory mutations and finished calculations use transactions.
+- Decimal values are stored as exact text and parsed into `Decimal`; money is rounded to cents with `ROUND_HALF_UP`.
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `salon_cost_bot/database.py` — schema, versioning, safe initial seeding, persistent async SQLite access.
+- `salon_cost_bot/services.py` — calculation, pricing, inventory, history, backup and inventory-session operations.
+- `salon_cost_bot/handlers/` — Telegram menus, master flow and admin flows.
+- `salon_cost_bot/catalog.py` — initial categories, product/shade catalog, pricing rules and historical stock.
+- `salon_cost_bot/backups.py` — consistent SQLite backup and CSV exports.
+- `tests/` — isolated tests using temporary SQLite files.
+- `README.md` — setup, data safety, hosting and restore guidance in Russian.
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- SQLite `user_version` migrations are forward-only; data is never dropped and a pre-migration backup is created when an existing file is upgraded.
+- Physical products are separate from pricing rules; product-level rates override category/brand defaults.
+- Calculation completion creates calculation snapshots and inventory movements in one transaction, keyed by a unique completion token.
+- The process holds a non-blocking local lock and reports Telegram duplicate-polling conflicts. Use exactly one worker per bot token.
+- SQLite is the current backend. `DATABASE_URL` accepts only a SQLite URL; PostgreSQL requires a future adapter.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Masters can build multi-material cost calculations, use the two-phase acid-remover flow, and see only their own calculation history.
+- Administrators can manage stock, receipts, write-offs, single/full inventory counts, pricing, products, global calculation history, movement history, and exports.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- All user-facing text is Russian and timestamps display in Europe/Moscow.
+- Never expose `BOT_TOKEN`; never log it or store it in source or README.
+- Keep master inventory and purchase-cost information private from non-admin users.
+- Keep financial arithmetic in `Decimal`; do not change historical calculation snapshots when rates change.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Do not publish this long-polling bot as an Autoscale service; use an always-running VM and persistent database disk.
+- Start only one bot process for each token. Local lock catches same-database duplicates; Telegram reports a second polling process on another host.
+- `MemoryStorage` holds only unfinished conversational state. A restart cancels an unfinished draft without changing stock; saved data remains in SQLite.
 
 ## Pointers
 
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- See `README.md` for run instructions, data safety, hosting and restore guidance.

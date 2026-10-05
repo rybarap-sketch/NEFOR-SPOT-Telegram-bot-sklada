@@ -1,0 +1,9 @@
+[project]
+name = "nefor-spot-cost-bot"
+version = "1.0.0"
+description = "Telegram bot for NEFOR SPOT salon procedure costs and inventory"
+requires-python = ">=3.11"
+dependencies = [
+    "aiogram==3.21.0",
+    "aiosqlite==0.21.0",
+]
