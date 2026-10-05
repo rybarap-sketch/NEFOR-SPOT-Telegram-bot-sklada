@@ -79,3 +79,4 @@ channel = "stable-25_05"
 
 [userenv.shared]
 DATABASE_PATH = "data/salon_costs.sqlite3"
+NEON_DATABASE_URL = "postgresql://neondb_owner:npg_1Qrf4SATneNs@ep-billowing-dew-b2lqee88-pooler.c-6.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
