@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import asyncio
-import fcntl
 import logging
-from typing import IO
+import os
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher
-from aiogram.exceptions import TelegramConflictError
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ErrorEvent
+from aiogram.types import ErrorEvent, Update
 
 from salon_cost_bot.config import Settings
 from salon_cost_bot.database import Database
@@ -23,37 +21,10 @@ from salon_cost_bot.handlers.history import router as history_router
 from salon_cost_bot.services import SalonService
 
 
-class BotInstanceLock:
-    def __init__(self, database_path) -> None:
-        self.path = database_path.with_suffix(database_path.suffix + ".lock")
-        self._file: IO[str] | None = None
-
-    def acquire(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = self.path.open("w")
-        try:
-            fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            self._file.close()
-            self._file = None
-            raise RuntimeError(
-                "Бот уже запущен с этой базой. Оставьте только один polling-процесс."
-            ) from error
-
-    def release(self) -> None:
-        if self._file is not None:
-            fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
-            self._file.close()
-            self._file = None
-
-
 def configure_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
-    logging.getLogger("aiogram.event").setLevel(
-        getattr(logging, level, logging.INFO)
     )
 
 
@@ -62,85 +33,163 @@ async def run() -> None:
     configure_logging(settings.log_level)
     logger = logging.getLogger("nefor.bot")
 
-    lock = BotInstanceLock(settings.database_path)
-    lock.acquire()
-    db = Database(settings.database_path)
-    bot: Bot | None = None
+    if not settings.database_url:
+        raise RuntimeError("Не задан DATABASE_URL для Neon.")
+
+    db = Database(settings.database_url)
+    await db.open()
+
+    bot = Bot(token=settings.bot_token)
+    service = SalonService(db)
+
+    dispatcher = Dispatcher(storage=MemoryStorage())
+    dispatcher["settings"] = settings
+    dispatcher["service"] = service
+
+    setup_common_handlers(settings=settings, service=service)
+    dispatcher.include_router(common_router)
+    dispatcher.include_router(history_router)
+    dispatcher.include_router(calculations_router)
+    dispatcher.include_router(admin_router)
+
+    async def report_unhandled_error(event: ErrorEvent) -> bool:
+        update_id = event.update.update_id if event.update else "unknown"
+
+        logger.exception(
+            "Unhandled update error; update_id=%s",
+            update_id,
+            exc_info=event.exception,
+        )
+
+        if event.update and event.update.message:
+            try:
+                user_id = (
+                    event.update.message.from_user.id
+                    if event.update.message.from_user
+                    else None
+                )
+
+                await event.update.message.answer(
+                    "Не удалось обработать запрос. Попробуйте ещё раз; "
+                    "если ошибка повторится, сообщите администратору."
+                )
+
+                if is_admin(settings, user_id):
+                    logger.error(
+                        "Unhandled error occurred in an admin request"
+                    )
+            except Exception:
+                logger.debug(
+                    "Could not send the user-facing error notice"
+                )
+
+        return True
+
+    dispatcher.errors.register(report_unhandled_error)
+
+    me = await bot.get_me()
+    logger.info(
+        "Telegram bot authenticated; username=%s",
+        me.username or "unknown",
+    )
+
+    app = web.Application()
+
+    async def health(request: web.Request) -> web.Response:
+        return web.Response(text="NEFOR SPOT bot is running")
+
+    async def telegram_webhook(
+        request: web.Request,
+    ) -> web.Response:
+        try:
+            data = await request.json()
+            update = Update.model_validate(
+                data,
+                context={"bot": bot},
+            )
+
+            await dispatcher.feed_update(bot, update)
+            return web.Response(text="OK")
+        except Exception:
+            logger.exception("Webhook update failed")
+            return web.Response(
+                text="ERROR",
+                status=500,
+            )
+
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    app.router.add_post("/telegram-webhook", telegram_webhook)
+
+    render_external_url = os.getenv(
+        "RENDER_EXTERNAL_URL",
+        "",
+    ).rstrip("/")
+
+    webhook_url = os.getenv(
+        "WEBHOOK_URL",
+        "",
+    ).strip()
+
+    if not webhook_url and render_external_url:
+        webhook_url = (
+            f"{render_external_url}/telegram-webhook"
+        )
+
+    if not webhook_url:
+        raise RuntimeError(
+            "Не удалось определить WEBHOOK_URL."
+        )
+
+    await bot.set_webhook(
+        webhook_url,
+        allowed_updates=dispatcher.resolve_used_update_types(),
+        drop_pending_updates=False,
+    )
+
+    logger.info(
+        "Telegram webhook configured: %s",
+        webhook_url,
+    )
+
+    port = int(os.getenv("PORT", "10000"))
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+
+    site = web.TCPSite(
+        runner,
+        "0.0.0.0",
+        port,
+    )
+
+    await site.start()
+
+    logger.info(
+        "HTTP server started on port %s",
+        port,
+    )
+
     try:
-        await db.open()
-        bot = Bot(token=settings.bot_token)
-        service = SalonService(db)
-        dispatcher = Dispatcher(storage=MemoryStorage())
-        dispatcher["settings"] = settings
-        dispatcher["service"] = service
-        setup_common_handlers(settings=settings, service=service)
-        dispatcher.include_router(common_router)
-        dispatcher.include_router(history_router)
-        dispatcher.include_router(calculations_router)
-        dispatcher.include_router(admin_router)
+        import asyncio
 
-        async def report_unhandled_error(event: ErrorEvent) -> bool:
-            update_id = event.update.update_id if event.update else "unknown"
-            logger.error(
-                "Unhandled update error; update_id=%s type=%s",
-                update_id,
-                type(event.exception).__name__,
-            )
-            if event.update and event.update.message:
-                try:
-                    user_id = (
-                        event.update.message.from_user.id
-                        if event.update.message.from_user
-                        else None
-                    )
-                    await event.update.message.answer(
-                        "Не удалось обработать запрос. Попробуйте ещё раз; "
-                        "если ошибка повторится, сообщите администратору."
-                    )
-                    if is_admin(settings, user_id):
-                        logger.error("Unhandled error occurred in an admin request")
-                except Exception:
-                    logger.debug("Could not send the user-facing error notice")
-            return True
-
-        dispatcher.errors.register(report_unhandled_error)
-
-        try:
-            me = await bot.get_me()
-        except Exception as error:
-            logger.error(
-                "Could not connect to Telegram Bot API; error_type=%s",
-                type(error).__name__,
-            )
-            raise RuntimeError(
-                "Не удалось подключиться к Telegram Bot API. Проверьте BOT_TOKEN и сетевой доступ."
-            ) from error
-        logger.info("Telegram bot authenticated; username=%s", me.username or "unknown")
-        logger.info("Starting Telegram long polling")
-        try:
-            await dispatcher.start_polling(
-                bot,
-                allowed_updates=dispatcher.resolve_used_update_types(),
-                close_bot_session=False,
-            )
-        except TelegramConflictError as error:
-            logger.critical(
-                "Telegram rejected duplicate polling. Stop the other bot process; "
-                "production requires exactly one polling worker."
-            )
-            raise RuntimeError("Обнаружен второй процесс long polling.") from error
+        await asyncio.Event().wait()
     finally:
-        if bot is not None:
-            await bot.session.close()
+        await bot.delete_webhook()
+        await bot.session.close()
         await db.close()
-        lock.release()
+        await runner.cleanup()
 
 
 def main() -> None:
+    import asyncio
+
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
-        logging.getLogger("nefor.bot").info("Bot stopped")
+        logging.getLogger("nefor.bot").info(
+            "Bot stopped"
+        )
 
 
 if __name__ == "__main__":
