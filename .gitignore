@@ -61,3 +61,5 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+!data/
+!data/salon_costs.sqlite3
