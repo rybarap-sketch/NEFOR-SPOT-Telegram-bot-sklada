@@ -1796,7 +1796,7 @@ async def exports_menu(callback: CallbackQuery, settings: Settings) -> None:
         "Резервная копия и выгрузки доступны только администратору.",
         InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="💾 База SQLite", callback_data="adm:export:backup")],
+                [InlineKeyboardButton(text="💾 Резервная копия Neon", callback_data="adm:export:backup")],
                 [InlineKeyboardButton(text="📦 Остатки CSV", callback_data="adm:export:inventory")],
                 [InlineKeyboardButton(text="📜 Движения CSV", callback_data="adm:export:movements")],
                 [InlineKeyboardButton(text="📊 Расчёты CSV", callback_data="adm:export:calculations")],
@@ -1821,14 +1821,19 @@ async def send_export(
     await safe_answer(callback, "Готовлю файл…")
     with tempfile.TemporaryDirectory(prefix="nefor-export-") as temp:
         suffix = timestamp()
-        if kind == "backup":
-            path = Path(temp) / f"nefor-backup-{suffix}.sqlite3"
-            await service.create_database_backup(path)
-            caption = "Согласованная резервная копия базы SQLite."
-        else:
-            path = Path(temp) / f"nefor-{kind}-{suffix}.csv"
-            await service.export_csv(kind, path)
-            caption = "Экспорт данных. CSV с разделителем «;»."
+        try:
+            if kind == "backup":
+                path = Path(temp) / f"nefor-neon-backup-{suffix}.json.gz"
+                await service.create_database_backup(path)
+                caption = "Резервная копия Neon: склад, цены, движения и история (JSON.GZ). Храните файл в защищённом месте."
+            else:
+                path = Path(temp) / f"nefor-{kind}-{suffix}.csv"
+                await service.export_csv(kind, path)
+                caption = "Экспорт данных. CSV с разделителем «;»."
+        except Exception:
+            logger.exception("Failed to create admin export")
+            await callback.message.answer("Не удалось подготовить файл. Проверьте логи сервера.")
+            return
         try:
             await callback.message.answer_document(
                 FSInputFile(path), caption=caption
