@@ -4,6 +4,8 @@ from aiogram.fsm.state import State, StatesGroup
 class CalculationFlow(StatesGroup):
     selecting = State()
     entering_quantity = State()
+    entering_service_price = State()
+    confirming = State()
 
 
 class ReceiptFlow(StatesGroup):

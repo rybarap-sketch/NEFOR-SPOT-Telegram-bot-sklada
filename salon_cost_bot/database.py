@@ -10,7 +10,7 @@ import asyncpg
 from salon_cost_bot.catalog import BRAND_RATES, CATEGORIES, PRODUCTS
 
 logger = logging.getLogger(__name__)
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> str:
@@ -94,6 +94,21 @@ CREATE TABLE IF NOT EXISTS calculations (
 
 CREATE INDEX IF NOT EXISTS idx_calculations_user_created
     ON calculations(telegram_user_id, created_at DESC, id DESC);
+
+-- Stores a snapshot of the financial split; old calculations remain untouched.
+-- Built with CREATE IF NOT EXISTS, so existing Neon tables/stock are preserved.
+CREATE TABLE IF NOT EXISTS calculation_settlements (
+    calculation_id BIGINT PRIMARY KEY REFERENCES calculations(id),
+    service_price TEXT NOT NULL,
+    materials_cost TEXT NOT NULL,
+    distributable TEXT NOT NULL,
+    master_percent TEXT NOT NULL,
+    salon_percent TEXT NOT NULL,
+    master_share TEXT NOT NULL,
+    salon_share TEXT NOT NULL,
+    payable_to_salon TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS calculation_items (
     id BIGSERIAL PRIMARY KEY,

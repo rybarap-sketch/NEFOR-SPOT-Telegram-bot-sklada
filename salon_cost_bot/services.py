@@ -10,6 +10,7 @@ import aiosqlite
 
 from salon_cost_bot.database import Database, utc_now
 from salon_cost_bot.domain import ZERO, decimal_text, money
+from salon_cost_bot.payouts import calculate_payout
 
 
 def _dict(row: aiosqlite.Row | None) -> dict[str, Any] | None:
@@ -225,6 +226,60 @@ class SalonService:
             raise ValueError(f"Для материала «{product['name']}» не задана ставка.")
         return Decimal(row["calculation_rate"])
 
+    async def _prepare_calculation_lines(
+        self, conn: aiosqlite.Connection, lines: Sequence[CalculationLine]
+    ) -> tuple[list[dict[str, Any]], Decimal]:
+        if not lines:
+            raise ValueError("Добавьте хотя бы один материал.")
+        prepared: list[dict[str, Any]] = []
+        total = ZERO
+        for line in lines:
+            if not line.quantity.is_finite() or line.quantity <= ZERO:
+                raise ValueError("Количество материала должно быть больше нуля.")
+            async with conn.execute(
+                """SELECT p.*, c.name AS category_name, b.name AS brand_name
+                   FROM products p
+                   JOIN categories c ON c.id = p.category_id
+                   JOIN brands b ON b.id = p.brand_id
+                   WHERE p.id = ? AND p.is_active = 1 AND p.visible_to_masters = 1""",
+                (line.product_id,),
+            ) as cursor:
+                product = await cursor.fetchone()
+            if product is None:
+                raise ValueError("Один из материалов больше недоступен. Начните расчёт заново.")
+            rate = await self.effective_rate(conn, product)
+            line_cost = money(line.quantity * rate)
+            total += line_cost
+            prepared.append(
+                {
+                    "product_id": product["id"],
+                    "name": product["name"],
+                    "brand": product["brand_name"],
+                    "category": product["category_name"],
+                    "quantity": line.quantity,
+                    "unit": product["unit"],
+                    "rate": rate,
+                    "cost": line_cost,
+                }
+            )
+        return prepared, money(total)
+
+    async def preview_calculation(
+        self, lines: Sequence[CalculationLine]
+    ) -> tuple[list[dict[str, Any]], Decimal]:
+        """Read-only preview; does not write calculations or consume stock."""
+        async with self.db.transaction() as conn:
+            return await self._prepare_calculation_lines(conn, lines)
+
+    async def get_calculation_settlement(
+        self, calculation_id: int
+    ) -> dict[str, Any] | None:
+        row = await self.db.fetchone(
+            "SELECT * FROM calculation_settlements WHERE calculation_id = ?",
+            (calculation_id,),
+        )
+        return _dict(row)
+
     async def complete_calculation(
         self,
         *,
@@ -233,6 +288,7 @@ class SalonService:
         username: str | None,
         full_name: str,
         lines: Sequence[CalculationLine],
+        service_price: Decimal | None = None,
     ) -> tuple[int, Decimal, list[dict[str, Any]], bool]:
         if not lines:
             raise ValueError("Добавьте хотя бы один материал.")
@@ -252,35 +308,8 @@ class SalonService:
                     False,
                 )
 
-            prepared: list[dict[str, Any]] = []
-            total = ZERO
-            for line in lines:
-                async with conn.execute(
-                    """SELECT p.*, c.name AS category_name, b.name AS brand_name
-                       FROM products p
-                       JOIN categories c ON c.id = p.category_id
-                       JOIN brands b ON b.id = p.brand_id
-                       WHERE p.id = ? AND p.is_active = 1 AND p.visible_to_masters = 1""",
-                    (line.product_id,),
-                ) as cursor:
-                    product = await cursor.fetchone()
-                if product is None:
-                    raise ValueError("Один из материалов больше недоступен. Начните расчёт заново.")
-                rate = await self.effective_rate(conn, product)
-                line_cost = money(line.quantity * rate)
-                total += line_cost
-                prepared.append(
-                    {
-                        "product_id": product["id"],
-                        "name": product["name"],
-                        "brand": product["brand_name"],
-                        "category": product["category_name"],
-                        "quantity": line.quantity,
-                        "unit": product["unit"],
-                        "rate": rate,
-                        "cost": line_cost,
-                    }
-                )
+            prepared, total = await self._prepare_calculation_lines(conn, lines)
+            payout = calculate_payout(service_price, total) if service_price is not None else None
 
             created_at = utc_now()
             cursor = await conn.execute(
@@ -351,6 +380,26 @@ class SalonService:
                         telegram_user_id,
                         f"Списание по расчёту #{calculation_id}",
                         f"{completion_token}:{index}",
+                        created_at,
+                    ),
+                )
+            if payout is not None:
+                await conn.execute(
+                    """INSERT INTO calculation_settlements
+                       (calculation_id, service_price, materials_cost, distributable,
+                        master_percent, salon_percent, master_share, salon_share,
+                        payable_to_salon, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        calculation_id,
+                        decimal_text(payout.service_price),
+                        decimal_text(payout.materials_cost),
+                        decimal_text(payout.distributable),
+                        decimal_text(payout.master_percent),
+                        decimal_text(payout.salon_percent),
+                        decimal_text(payout.master_share),
+                        decimal_text(payout.salon_share),
+                        decimal_text(payout.payable_to_salon),
                         created_at,
                     ),
                 )

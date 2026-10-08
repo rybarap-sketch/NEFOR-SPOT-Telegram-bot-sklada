@@ -17,6 +17,7 @@ from salon_cost_bot.keyboards import (
     rows_keyboard,
 )
 from salon_cost_bot.services import CalculationLine, SalonService
+from salon_cost_bot.payouts import calculate_payout
 from salon_cost_bot.handlers.common import safe_answer
 from salon_cost_bot.handlers.states import CalculationFlow
 
@@ -415,9 +416,99 @@ async def finish_calculation(
     callback: CallbackQuery, state: FSMContext, service: SalonService
 ) -> None:
     data = await state.get_data()
-    raw_items = data.get("items", [])
-    if not raw_items or not data.get("token"):
+    if not data.get("items") or not data.get("token"):
         await safe_answer(callback, "Добавьте материалы перед завершением.")
+        return
+    if await state.get_state() != CalculationFlow.selecting.state:
+        await safe_answer(callback, "Завершите текущий шаг или отмените расчёт.")
+        return
+    await state.set_state(CalculationFlow.entering_service_price)
+    if callback.message:
+        await callback.message.answer(
+            "💰 Сколько клиент заплатил за окрашивание?\n"
+            "Введите полную стоимость окрашивания в рублях, например: 8000.\n"
+            "Стрижку, оплаченную отдельно, здесь не учитывайте."
+        )
+    await safe_answer(callback)
+
+
+@router.message(CalculationFlow.entering_service_price)
+async def enter_service_price(
+    message: Message, state: FSMContext, service: SalonService
+) -> None:
+    try:
+        price = parse_decimal(message.text or "")
+        if not price.is_finite() or price <= 0:
+            raise ValueError("Введите положительную стоимость окрашивания в рублях.")
+        data = await state.get_data()
+        raw_items = data.get("items", [])
+        if not raw_items or not data.get("token"):
+            await state.clear()
+            await message.answer("Расчёт устарел. Начните заново.")
+            return
+        lines = [
+            CalculationLine(product_id=int(item["product_id"]),
+                            quantity=Decimal(item["quantity"]))
+            for item in raw_items
+        ]
+        # Preview reads current rates and does not change inventory.
+        _prepared, materials_total = await service.preview_calculation(lines)
+        payout = calculate_payout(price, materials_total)
+    except ValueError as error:
+        await message.answer(str(error))
+        return
+    except Exception:
+        logger.exception("Coloring payout preview failed")
+        await message.answer("Не удалось посчитать стоимость. Попробуйте ещё раз.")
+        return
+
+    await state.update_data(service_price=decimal_text(payout.service_price))
+    await state.set_state(CalculationFlow.confirming)
+    await message.answer(
+        "✂️ NEFOR SPOT · Проверьте расчёт\n\n"
+        f"Окрашивание: {money_text(payout.service_price)} ₽\n"
+        f"Расходники: {money_text(payout.materials_cost)} ₽\n"
+        f"После вычета расходников: {money_text(payout.distributable)} ₽\n\n"
+        f"Мастер ({money_text(payout.master_percent)}%): "
+        f"{money_text(payout.master_share)} ₽\n"
+        f"Салон ({money_text(payout.salon_percent)}%): "
+        f"{money_text(payout.salon_share)} ₽\n\n"
+        f"На расходники в кассу: {money_text(payout.materials_cost)} ₽\n"
+        f"💳 ИТОГО ПЕРЕДАТЬ САЛОНУ: {money_text(payout.payable_to_salon)} ₽\n\n"
+        "Это сумма, если оплату от клиента получил мастер.\n"
+        "Склад спишется только после подтверждения.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Сохранить и списать", callback_data="calc:confirm_save")],
+                [InlineKeyboardButton(text="✏️ Изменить цену", callback_data="calc:change_price")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="calc:cancel")],
+            ]
+        ),
+    )
+
+
+@router.callback_query(F.data == "calc:change_price")
+async def change_service_price(callback: CallbackQuery, state: FSMContext) -> None:
+    if await state.get_state() != CalculationFlow.confirming.state:
+        await safe_answer(callback, "Этот расчёт уже неактуален.")
+        return
+    await state.set_state(CalculationFlow.entering_service_price)
+    if callback.message:
+        await callback.message.answer("Введите новую стоимость окрашивания в рублях:")
+    await safe_answer(callback)
+
+
+@router.callback_query(F.data == "calc:confirm_save")
+async def confirm_calculation(
+    callback: CallbackQuery, state: FSMContext, service: SalonService
+) -> None:
+    if await state.get_state() != CalculationFlow.confirming.state:
+        await safe_answer(callback, "Этот расчёт уже сохранён или отменён.")
+        return
+    data = await state.get_data()
+    raw_items = data.get("items", [])
+    if not raw_items or not data.get("token") or not data.get("service_price"):
+        await safe_answer(callback, "Расчёт устарел. Начните заново.")
         return
     lines = [
         CalculationLine(
@@ -433,19 +524,24 @@ async def finish_calculation(
             username=callback.from_user.username,
             full_name=callback.from_user.full_name,
             lines=lines,
+            service_price=Decimal(data["service_price"]),
         )
+        settlement = await service.get_calculation_settlement(calculation_id)
     except ValueError as error:
         await safe_answer(callback, str(error))
+        if callback.message:
+            await callback.message.answer(str(error) + "\nИзмените цену или проверьте материалы.")
         return
     except Exception:
         logger.exception("Calculation completion failed")
-        await safe_answer(callback, "Не удалось сохранить расчёт. Склад не изменён.")
+        await safe_answer(callback, "Ошибка сохранения. Проверьте историю перед повтором.")
         if callback.message:
             await callback.message.answer(
-                "Не удалось сохранить расчёт. Попробуйте ещё раз; склад не изменён."
+                "Не удалось подтвердить результат. Проверьте историю расчётов "
+                "перед повторной отправкой."
             )
         return
-    result = ["Расчёт завершён:"]
+    result = [f"✅ Расчёт №{calculation_id} сохранён:"]
     for item in saved_lines:
         quantity = Decimal(str(item["quantity"]))
         cost = Decimal(str(item["cost"]))
@@ -453,9 +549,24 @@ async def finish_calculation(
             f"• {item['brand']} {item['name']} — "
             f"{quantity_text(quantity)} {item['unit']} — {money_text(cost)} ₽"
         )
-    result.append(f"\nИтого расходники: {money_text(total)} ₽")
+    result.append(f"\nРасходники: {money_text(total)} ₽")
+    if settlement is not None:
+        price = Decimal(settlement["service_price"])
+        net = Decimal(settlement["distributable"])
+        master = Decimal(settlement["master_share"])
+        salon = Decimal(settlement["salon_share"])
+        payable = Decimal(settlement["payable_to_salon"])
+        result.extend([
+            f"Окрашивание: {money_text(price)} ₽",
+            f"К распределению: {money_text(net)} ₽",
+            f"Мастер ({settlement['master_percent']}%): {money_text(master)} ₽",
+            f"Салон ({settlement['salon_percent']}%): {money_text(salon)} ₽",
+            f"Расходники вернуть: {money_text(total)} ₽",
+            f"💳 ИТОГО ПЕРЕДАТЬ САЛОНУ: {money_text(payable)} ₽",
+            "(если оплату от клиента получил мастер)",
+        ])
     if not created:
-        result.append("\nЭтот расчёт уже был сохранён; повторного списания нет.")
+        result.append("\nЭтот расчёт уже был сохранён. Повторного списания нет.")
     await state.clear()
     if callback.message:
         await callback.message.answer("\n".join(result))
