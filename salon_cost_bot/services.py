@@ -236,6 +236,8 @@ class SalonService:
     ) -> tuple[int, Decimal, list[dict[str, Any]], bool]:
         if not lines:
             raise ValueError("Добавьте хотя бы один материал.")
+        if any(not line.quantity.is_finite() or line.quantity <= ZERO for line in lines):
+            raise ValueError("Расход материала должен быть положительным числом.")
 
         async with self.db.transaction() as conn:
             async with conn.execute(
@@ -441,6 +443,14 @@ class SalonService:
         package_count: Decimal | None = None,
         price_per_package: Decimal | None = None,
     ) -> tuple[Decimal, Decimal]:
+        if not quantity.is_finite() or quantity <= ZERO:
+            raise ValueError("Количество прихода должно быть больше нуля.")
+        if price_per_package is not None and (not price_per_package.is_finite() or price_per_package < ZERO):
+            raise ValueError("Закупочная цена не может быть отрицательной.")
+        if package_quantity is not None and (not package_quantity.is_finite() or package_quantity <= ZERO):
+            raise ValueError("Масса упаковки должна быть больше нуля.")
+        if package_count is not None and (not package_count.is_finite() or package_count <= ZERO):
+            raise ValueError("Количество упаковок должно быть больше нуля.")
         now = utc_now()
         async with self.db.transaction() as conn:
             async with conn.execute(
@@ -504,6 +514,8 @@ class SalonService:
         reason: str,
         admin_user_id: int,
     ) -> tuple[Decimal, Decimal]:
+        if not quantity.is_finite() or quantity <= ZERO:
+            raise ValueError("Количество списания должно быть больше нуля.")
         now = utc_now()
         async with self.db.transaction() as conn:
             async with conn.execute(
@@ -550,6 +562,8 @@ class SalonService:
         admin_user_id: int,
         session_id: int | None = None,
     ) -> tuple[Decimal, Decimal, Decimal]:
+        if not actual_balance.is_finite() or actual_balance < ZERO:
+            raise ValueError("Фактический остаток не может быть отрицательным.")
         now = utc_now()
         async with self.db.transaction() as conn:
             async with conn.execute(
@@ -594,6 +608,8 @@ class SalonService:
     async def change_price(
         self, product_id: int, new_rate: Decimal, admin_user_id: int
     ) -> tuple[Decimal | None, Decimal]:
+        if not new_rate.is_finite() or new_rate < ZERO:
+            raise ValueError("Расчётная ставка не может быть отрицательной.")
         now = utc_now()
         async with self.db.transaction() as conn:
             async with conn.execute(
@@ -681,6 +697,14 @@ class SalonService:
         product_name = name.strip()
         if not brand or not product_name:
             raise ValueError("Укажите бренд и название материала.")
+        if package_quantity is not None and (not package_quantity.is_finite() or package_quantity <= ZERO):
+            raise ValueError("Масса упаковки должна быть больше нуля.")
+        if purchase_price_per_unit is not None and (not purchase_price_per_unit.is_finite() or purchase_price_per_unit < ZERO):
+            raise ValueError("Закупочная цена не может быть отрицательной.")
+        if calculation_rate is not None and (not calculation_rate.is_finite() or calculation_rate < ZERO):
+            raise ValueError("Расчётная ставка не может быть отрицательной.")
+        if not initial_stock.is_finite():
+            raise ValueError("Некорректный начальный остаток.")
         now = utc_now()
         sku = f"custom:{category_id}:{brand.casefold()}:{product_name.casefold()}:{uuid4().hex[:10]}"
         async with self.db.transaction() as conn:
@@ -769,6 +793,10 @@ class SalonService:
         }
         if field not in allowed:
             raise ValueError("Это поле нельзя изменить.")
+        if field in {"package_quantity", "purchase_price_per_unit", "low_stock_threshold"} and value is not None:
+            amount = Decimal(str(value))
+            if not amount.is_finite() or (field == "package_quantity" and amount <= ZERO) or (field != "package_quantity" and amount < ZERO):
+                raise ValueError("Некорректная цена, масса упаковки или порог остатка.")
         async with self.db.transaction() as conn:
             cursor = await conn.execute(
                 f"UPDATE products SET {field} = ?, updated_at = ? WHERE id = ?",
@@ -954,6 +982,8 @@ class SalonService:
         actual_balance: Decimal | None,
         skip: bool = False,
     ) -> dict[str, Any]:
+        if actual_balance is not None and (not actual_balance.is_finite() or actual_balance < ZERO):
+            raise ValueError("Фактический остаток не может быть отрицательным.")
         now = utc_now()
         async with self.db.transaction() as conn:
             async with conn.execute(
@@ -1041,18 +1071,10 @@ class SalonService:
                     session_id,
                 ),
             )
-            pending_row = await conn.execute(
-                """SELECT COUNT(*) AS count FROM inventory_session_items
-                   WHERE session_id = ? AND status = 'pending'""",
-                (session_id,),
-            )
-            pending_result = await pending_row.fetchone()
-            if pending_result["count"] == 0:
-                await conn.execute(
-                    """UPDATE inventory_sessions SET status = 'completed',
-                       completed_at = ? WHERE id = ?""",
-                    (now, session_id),
-                )
+            # The handler immediately calls _send_next_session_product(),
+            # which calls finish_inventory_session() when no items remain.
+            # Do not mark the session completed here: that prevented the
+            # completion method from returning the final summary.
             return {"already_handled": False, "delta": delta}
 
     @staticmethod

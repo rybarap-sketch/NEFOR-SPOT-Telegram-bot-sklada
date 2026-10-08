@@ -538,14 +538,7 @@ async def select_product_action(
     elif action == "edit":
         await _show_edit_menu(callback, service, product_id)
     elif action == "archive":
-        product = await service.get_product(product_id)
-        if product:
-            await service.set_product_field(
-                product_id, "is_active", int(not product["is_active"])
-            )
-            await _send(callback, "Статус позиции обновлён.")
-        else:
-            await safe_answer(callback, "Материал не найден.")
+        await _ask_archive_confirmation(callback, service, product_id)
     else:
         await _product_detail(callback, service, product_id)
 
@@ -703,6 +696,8 @@ async def receipt_package_price(
     else:
         try:
             price = parse_decimal(raw)
+            if not price.is_finite() or price < 0:
+                raise ValueError("Цена упаковки не может быть отрицательной.")
         except ValueError as error:
             await message.answer(str(error))
             return
@@ -802,6 +797,62 @@ async def receipt_from_detail(
     await _start_receipt(callback, state, service, product_id)
 
 
+async def _ask_archive_confirmation(
+    callback: CallbackQuery, service: SalonService, product_id: int
+) -> None:
+    product = await service.get_product(product_id)
+    if product is None:
+        await safe_answer(callback, "Материал не найден.")
+        return
+    # The target status is fixed in the button, so pressing it twice cannot
+    # accidentally undo the change.
+    target_active = 0 if product["is_active"] else 1
+    action_label = "архивировать" if target_active == 0 else "восстановить"
+    await _send(
+        callback,
+        f"Вы действительно хотите {action_label} материал "
+        f"«{product['brand_name']} · {product['name']}»?",
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="✅ Подтвердить",
+                    callback_data=f"adm:archive:apply:{product_id}:{target_active}",
+                )],
+                [InlineKeyboardButton(
+                    text="✖️ Отмена",
+                    callback_data=f"adm:stock:product:{product_id}",
+                )],
+            ]
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("adm:archive:apply:"))
+async def apply_archive_status(
+    callback: CallbackQuery, settings: Settings, service: SalonService
+) -> None:
+    if not await _allowed(callback, settings):
+        return
+    try:
+        _, _, _, product_raw, active_raw = callback.data.split(":")
+        product_id, target_active = int(product_raw), int(active_raw)
+        if target_active not in {0, 1}:
+            raise ValueError
+    except (ValueError, AttributeError):
+        await safe_answer(callback, "Действие устарело.")
+        return
+    product = await service.get_product(product_id)
+    if product is None:
+        await safe_answer(callback, "Материал не найден.")
+        return
+    if int(bool(product["is_active"])) == target_active:
+        await _send(callback, "Статус материала уже обновлён.")
+        return
+    await service.set_product_field(product_id, "is_active", target_active)
+    status = "восстановлена" if target_active else "перемещена в архив"
+    await _send(callback, f"Позиция {status}. История и движения сохранены.")
+
+
 @router.callback_query(F.data.startswith("adm:archive:"))
 async def archive_or_restore_product(
     callback: CallbackQuery, settings: Settings, service: SalonService
@@ -813,15 +864,7 @@ async def archive_or_restore_product(
     except (ValueError, AttributeError):
         await safe_answer(callback, "Материал не найден.")
         return
-    product = await service.get_product(product_id)
-    if product is None:
-        await safe_answer(callback, "Материал не найден.")
-        return
-    await service.set_product_field(
-        product_id, "is_active", int(not product["is_active"])
-    )
-    status = "восстановлена" if not product["is_active"] else "перемещена в архив"
-    await _send(callback, f"Позиция {status}. История и движения сохранены.")
+    await _ask_archive_confirmation(callback, service, product_id)
 
 
 @router.message(WriteOffFlow.quantity)
@@ -973,6 +1016,8 @@ async def inventory_actual_message(
         return
     try:
         actual = parse_decimal(message.text or "")
+        if not actual.is_finite() or actual < 0:
+            raise ValueError("Фактический остаток не может быть отрицательным.")
     except ValueError as error:
         await message.answer(str(error))
         return
@@ -1227,6 +1272,8 @@ async def add_product_purchase_price(
     else:
         try:
             price = parse_decimal(raw)
+            if not price.is_finite() or price < 0:
+                raise ValueError("Закупочная цена не может быть отрицательной.")
         except ValueError as error:
             await message.answer(str(error))
             return
@@ -1247,6 +1294,8 @@ async def add_product_rate(
     else:
         try:
             rate = parse_decimal(raw)
+            if not rate.is_finite() or rate < 0:
+                raise ValueError("Расчётная ставка не может быть отрицательной.")
         except ValueError as error:
             await message.answer(str(error))
             return
@@ -1439,6 +1488,8 @@ async def set_price_rate(
         return
     try:
         rate = parse_decimal(message.text or "")
+        if not rate.is_finite() or rate < 0:
+            raise ValueError("Расчётная ставка не может быть отрицательной.")
     except ValueError as error:
         await message.answer(str(error))
         return
@@ -1615,8 +1666,10 @@ async def save_product_field(
         else:
             try:
                 parsed = parse_decimal(raw)
-                if field != "purchase_price_per_unit" and parsed <= 0:
-                    raise ValueError("Значение должно быть больше нуля.")
+                if not parsed.is_finite() or (field == "package_quantity" and parsed <= 0):
+                    raise ValueError("Масса упаковки должна быть больше нуля.")
+                if field != "package_quantity" and parsed < 0:
+                    raise ValueError("Цена или порог остатка не может быть отрицательным.")
                 value = decimal_text(parsed)
             except ValueError as error:
                 await message.answer(str(error))
@@ -1795,6 +1848,6 @@ async def admin_settings(callback: CallbackQuery, settings: Settings) -> None:
         f"Часовой пояс интерфейса: Europe/Moscow\n"
         f"ID администратора: {settings.admin_user_id}\n"
         f"Режим приложения: {settings.app_env}\n"
-        "Постоянная база: SQLite по пути DATABASE_PATH (по умолчанию data/nefor_spot.sqlite3).\n"
-        "Секрет BOT_TOKEN хранится в Replit Secrets.",
+        "Хранилище данных и секреты задаются переменными окружения сервера.\n"
+        "При работе через Render база может находиться в Neon.",
     )
