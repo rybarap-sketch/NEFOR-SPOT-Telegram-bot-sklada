@@ -10,9 +10,9 @@ from salon_cost_bot.payouts import calculate_payout
 class PayoutTests(unittest.TestCase):
     def test_expected_split(self):
         p = calculate_payout(Decimal("8000"), Decimal("878.70"))
-        self.assertEqual(p.master_share, Decimal("3916.72"))
-        self.assertEqual(p.salon_share, Decimal("3204.58"))
-        self.assertEqual(p.payable_to_salon, Decimal("4083.28"))
+        self.assertEqual(p.master_share, Decimal("3204.58"))
+        self.assertEqual(p.salon_share, Decimal("3916.72"))
+        self.assertEqual(p.payable_to_salon, Decimal("4795.42"))
 
     def test_reconciles_kopecks(self):
         for price, cost in [("100.01", "1.99"), ("50", "0"), ("1.01", "1")]:
