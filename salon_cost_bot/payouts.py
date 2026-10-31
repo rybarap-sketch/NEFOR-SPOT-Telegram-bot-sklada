@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 
 # Current NEFOR SPOT split. Change only after owner approval.
-MASTER_PERCENT = Decimal("55")
-SALON_PERCENT = Decimal("45")
+MASTER_PERCENT = Decimal("45")
+SALON_PERCENT = Decimal("55")
 KOPECK = Decimal("0.01")
 
 
@@ -46,8 +46,8 @@ def calculate_payout(service_price: Decimal, materials_cost: Decimal) -> Payout:
     if MASTER_PERCENT + SALON_PERCENT != Decimal("100"):
         raise RuntimeError("Сумма процентов мастера и салона должна быть 100%.")
     distributable = price - supplies
-    master = rubles(distributable * MASTER_PERCENT / Decimal("100"))
-    salon = distributable - master  # prevents a one-kopeck rounding discrepancy
+    salon = rubles(distributable * SALON_PERCENT / Decimal("100"))
+    master = distributable - salon  # prevents a one-kopeck rounding discrepancy
     return Payout(
         service_price=price,
         materials_cost=supplies,
