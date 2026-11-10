@@ -26,6 +26,7 @@ from salon_cost_bot.handlers.states import (
     InventoryCountFlow,
     InventorySearchFlow,
     PriceFlow,
+    PriceSearchFlow,
     ReceiptFlow,
     WriteOffFlow,
 )
@@ -1322,65 +1323,120 @@ async def add_product_visibility(
     await _send(callback, f"Позиция создана. ID: {product_id}. Начальный остаток внесён в журнал.")
 
 
+PRICES_PAGE_SIZE = 10
+
+
+def _format_unit(unit: str) -> str:
+    return {"g": "г", "ml": "мл", "pcs": "шт"}.get(unit, unit)
+
+
+def _format_price(value: str | None, unit: str) -> str:
+    if value is None:
+        return "не указана"
+    return f"{money_text(Decimal(value))} ₽/{_format_unit(unit)}"
+
+
+def _price_rows(rows: list[dict]) -> tuple[list[str], list[list[InlineKeyboardButton]]]:
+    lines: list[str] = []
+    buttons: list[list[InlineKeyboardButton]] = []
+    for row in rows:
+        rate = _format_price(row["calculation_rate"], row["unit"])
+        purchase = _format_price(row["purchase_price_per_unit"], row["unit"])
+        lines.append(
+            f"• {row['brand_name']} · {row['name']}\n"
+            f"   Расчёт: {rate} | Закупка: {purchase}"
+        )
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"🔎 {row['brand_name']} · {row['name']}"[:60],
+                    callback_data=f"adm:priceview:{row['id']}",
+                )
+            ]
+        )
+    return lines, buttons
+
+
 @router.callback_query(F.data == "adm:prices")
 async def price_rules(
-    callback: CallbackQuery, settings: Settings, service: SalonService
+    callback: CallbackQuery, settings: Settings, service: SalonService, state: FSMContext
 ) -> None:
     if not await _allowed(callback, settings):
         return
-    await _show_pricing_rules(callback, service, page=0)
-
-
-async def _show_pricing_rules(
-    callback: CallbackQuery, service: SalonService, *, page: int
-) -> None:
-    page_size = 18
-    rows = await service.pricing_rules(
-        offset=page * page_size, limit=page_size + 1
-    )
-    if not rows:
-        await _send(callback, "Правила цен пока не заданы.")
-        return
-    more = len(rows) > page_size
-    rows = rows[:page_size]
-    lines = ["Расчётные ставки (изменение откроет отдельный override позиции):"]
-    buttons = []
-    for row in rows:
-        product_label = f" · {row['product_name']}" if row["product_name"] else ""
-        lines.append(
-            f"• {row['category_name']} / {row['brand_name']}{product_label}: "
-            f"{money_text(Decimal(row['calculation_rate']))} ₽/{row['target_unit'] or 'ед.'}"
+    await state.clear()
+    categories = await service.categories()
+    buttons = [
+        [InlineKeyboardButton(text="📋 Все цены", callback_data="adm:prices:all:0")],
+        [InlineKeyboardButton(text="🔎 Поиск по бренду или названию", callback_data="adm:prices:search")],
+    ]
+    for category in categories:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{category['name']} · {category['product_count']}"[:60],
+                    callback_data=f"adm:prices:cat:{category['id']}:0",
+                )
+            ]
         )
-        if row["target_product_id"]:
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        text=f"{row['brand_name']}{product_label} · изменить",
-                        callback_data=f"adm:price:{row['target_product_id']}",
-                    )
-                ]
-            )
-    navigation = []
-    if page:
-        navigation.append(
-            InlineKeyboardButton(
-                text="‹ Назад", callback_data=f"adm:prices:{page - 1}"
-            )
-        )
-    if more:
-        navigation.append(
-            InlineKeyboardButton(
-                text="Далее ›", callback_data=f"adm:prices:{page + 1}"
-            )
-        )
-    if navigation:
-        buttons.append(navigation)
     buttons.append([InlineKeyboardButton(text="⬅️ К панели", callback_data="adm:home")])
-    await _send(callback, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons))
+    await _send(
+        callback,
+        "💰 Актуальные цены материалов\n\n"
+        "Расчётная ставка — стоимость единицы, которую бот учитывает в расходниках.\n"
+        "Закупочная — цена единицы материала для салона.\n\n"
+        "Цены берутся из действующего склада, а не из старого прайс-листа.\n"
+        "Выберите категорию или найдите материал:",
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
 
 
-@router.callback_query(F.data.startswith("adm:prices:"))
-async def price_rules_page(
+async def _show_price_catalog(
+    callback: CallbackQuery,
+    service: SalonService,
+    *,
+    category_id: int | None = None,
+    page: int = 0,
+) -> None:
+    page = max(0, page)
+    rows = await service.price_catalog(
+        category_id=category_id,
+        offset=page * PRICES_PAGE_SIZE,
+        limit=PRICES_PAGE_SIZE + 1,
+    )
+    more = len(rows) > PRICES_PAGE_SIZE
+    rows = rows[:PRICES_PAGE_SIZE]
+    if not rows:
+        await _send(
+            callback,
+            "В этой категории нет действующих материалов.",
+            InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ К ценам", callback_data="adm:prices")]
+                ]
+            ),
+        )
+        return
+    lines, buttons = _price_rows(rows)
+    nav = []
+    base = f"adm:prices:cat:{category_id}" if category_id is not None else "adm:prices:all"
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="‹ Назад", callback_data=f"{base}:{page - 1}"))
+    if more:
+        nav.append(InlineKeyboardButton(text="Далее ›", callback_data=f"{base}:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="⬅️ К категориям", callback_data="adm:prices")])
+    await _send(
+        callback,
+        f"💰 Актуальные цены · страница {page + 1}\n"
+        "Расчёт — ставка для окрашивания; закупка — себестоимость материала.\n\n"
+        + "\n\n".join(lines),
+        InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data.startswith("adm:prices:all:"))
+async def prices_all(
     callback: CallbackQuery, settings: Settings, service: SalonService
 ) -> None:
     if not await _allowed(callback, settings):
@@ -1388,9 +1444,107 @@ async def price_rules_page(
     try:
         page = max(0, int(callback.data.rsplit(":", 1)[1]))
     except (ValueError, AttributeError):
-        await safe_answer(callback, "Список ставок устарел.")
+        await safe_answer(callback, "Страница цен не найдена.")
         return
-    await _show_pricing_rules(callback, service, page=page)
+    await _show_price_catalog(callback, service, page=page)
+
+
+@router.callback_query(F.data.startswith("adm:prices:cat:"))
+async def prices_category(
+    callback: CallbackQuery, settings: Settings, service: SalonService
+) -> None:
+    if not await _allowed(callback, settings):
+        return
+    try:
+        _, category_raw, page_raw = callback.data.rsplit(":", 2)
+        category_id, page = int(category_raw), max(0, int(page_raw))
+    except (ValueError, AttributeError):
+        await safe_answer(callback, "Категория цен не найдена.")
+        return
+    await _show_price_catalog(callback, service, category_id=category_id, page=page)
+
+
+@router.callback_query(F.data == "adm:prices:search")
+async def price_search_start(
+    callback: CallbackQuery, settings: Settings, state: FSMContext
+) -> None:
+    if not await _allowed(callback, settings):
+        return
+    await state.set_state(PriceSearchFlow.query)
+    await _send(callback, "Введите бренд или материал для поиска цены, например: Secta.")
+
+
+@router.message(PriceSearchFlow.query)
+async def price_search_message(
+    message: Message, settings: Settings, state: FSMContext, service: SalonService
+) -> None:
+    if not await _allowed_message(message, settings):
+        return
+    query = (message.text or "").strip()
+    if len(query) < 2:
+        await message.answer("Введите минимум два символа.")
+        return
+    rows = await service.price_catalog(query=query, limit=PRICES_PAGE_SIZE + 1)
+    await state.clear()
+    if not rows:
+        await message.answer(
+            "По вашему запросу цены не найдены.",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="⬅️ К ценам", callback_data="adm:prices")]
+                ]
+            ),
+        )
+        return
+    more = len(rows) > PRICES_PAGE_SIZE
+    lines, buttons = _price_rows(rows[:PRICES_PAGE_SIZE])
+    buttons.append([InlineKeyboardButton(text="⬅️ К ценам", callback_data="adm:prices")])
+    hint = "\n\nПоказаны первые 10 результатов — уточните поиск." if more else ""
+    await message.answer(
+        f"💰 Цены по запросу «{query}»:\n\n" + "\n\n".join(lines) + hint,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data.startswith("adm:priceview:"))
+async def price_item_detail(
+    callback: CallbackQuery, settings: Settings, service: SalonService
+) -> None:
+    if not await _allowed(callback, settings):
+        return
+    try:
+        product_id = int(callback.data.rsplit(":", 1)[1])
+    except (ValueError, AttributeError):
+        await safe_answer(callback, "Материал не найден.")
+        return
+    product = await service.get_product(product_id)
+    if product is None:
+        await safe_answer(callback, "Материал не найден.")
+        return
+    details = await service.admin_product_details(product_id)
+    unit = product["unit"]
+    rate = _format_price(details["calculation_rate"], unit)
+    purchase = _format_price(product["purchase_price_per_unit"], unit)
+    package_price = (
+        f"{money_text(Decimal(product['purchase_price_per_package']))} ₽"
+        if product["purchase_price_per_package"] is not None
+        else "не указана"
+    )
+    await _send(
+        callback,
+        f"💰 {product['brand_name']} · {product['name']}\n"
+        f"Категория: {product['category_name']}\n\n"
+        f"Расчётная ставка: {rate}\n"
+        f"Закупочная цена: {purchase}\n"
+        f"Цена упаковки: {package_price}\n\n"
+        "Это текущие значения из базы склада.",
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="✏️ Изменить расчётную ставку", callback_data=f"adm:price:{product_id}")],
+                [InlineKeyboardButton(text="⬅️ К ценам", callback_data="adm:prices")],
+            ]
+        ),
+    )
 
 
 @router.callback_query(F.data.startswith("adm:price:"))
@@ -1423,9 +1577,12 @@ async def _start_price(
     await state.clear()
     await state.update_data(product_id=product_id, product=product)
     await state.set_state(PriceFlow.rate)
+    details = await service.admin_product_details(product_id)
+    current = _format_price(details["calculation_rate"], product["unit"])
     await _send(
         callback,
         f"{product['brand_name']} · {product['name']}\n"
+        f"Текущая расчётная ставка: {current}\n\n"
         "Введите новую расчётную ставку за единицу. "
         "Старые расчёты останутся без изменений.",
     )

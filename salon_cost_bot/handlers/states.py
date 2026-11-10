@@ -50,6 +50,10 @@ class EditProductFlow(StatesGroup):
     value = State()
 
 
+class PriceSearchFlow(StatesGroup):
+    query = State()
+
+
 class PriceFlow(StatesGroup):
     product = State()
     rate = State()

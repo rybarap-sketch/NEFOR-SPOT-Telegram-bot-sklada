@@ -142,6 +142,51 @@ class SalonService:
         )
         return [dict(row) for row in rows]
 
+
+    async def price_catalog(
+        self,
+        *,
+        category_id: int | None = None,
+        query: str | None = None,
+        offset: int = 0,
+        limit: int = 11,
+    ) -> list[dict[str, Any]]:
+        """Return actual per-product prices, respecting individual rate overrides."""
+        conditions = ["p.is_active = 1", "c.is_active = 1"]
+        parameters: list[Any] = []
+        if category_id is not None:
+            conditions.append("p.category_id = ?")
+            parameters.append(category_id)
+        if query:
+            pattern = f"%{query.strip()}%"
+            conditions.append(
+                "(LOWER(p.name) LIKE LOWER(?) OR LOWER(b.name) LIKE LOWER(?) "
+                "OR LOWER(c.name) LIKE LOWER(?))"
+            )
+            parameters.extend([pattern, pattern, pattern])
+        parameters.extend([limit, offset])
+        rows = await self.db.fetchall(
+            f"""SELECT p.id, p.name, p.unit, p.purchase_price_per_unit,
+                       p.purchase_price_per_package, p.package_quantity,
+                       b.name AS brand_name, c.name AS category_name,
+                       (SELECT r.calculation_rate
+                          FROM pricing_rules r
+                         WHERE r.category_id = p.category_id
+                           AND r.brand_id = p.brand_id
+                           AND (r.product_id = p.id OR r.product_id IS NULL)
+                         ORDER BY CASE WHEN r.product_id = p.id THEN 0 ELSE 1 END,
+                                  r.id DESC
+                         LIMIT 1) AS calculation_rate
+                FROM products p
+                JOIN brands b ON b.id = p.brand_id
+                JOIN categories c ON c.id = p.category_id
+                WHERE {" AND ".join(conditions)}
+                ORDER BY c.sort_order, b.name, p.name
+                LIMIT ? OFFSET ?""",
+            tuple(parameters),
+        )
+        return [dict(row) for row in rows]
+
     async def create_database_backup(self, destination):
         from salon_cost_bot.backups import create_database_backup
 

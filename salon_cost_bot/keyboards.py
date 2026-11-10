@@ -41,7 +41,7 @@ ADMIN_PANEL = InlineKeyboardMarkup(
     inline_keyboard=[
         [
             InlineKeyboardButton(text="📦 Склад", callback_data="adm:stock"),
-            InlineKeyboardButton(text="💰 Правила цен", callback_data="adm:prices"),
+            InlineKeyboardButton(text="💰 Актуальные цены", callback_data="adm:prices"),
         ],
         [
             InlineKeyboardButton(
