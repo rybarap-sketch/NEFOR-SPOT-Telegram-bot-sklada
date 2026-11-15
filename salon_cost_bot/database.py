@@ -594,6 +594,8 @@ class Database:
                             brand_id,
                             name,
                             unit,
+                            package_quantity,
+                            purchase_price_per_package,
                             purchase_price_per_unit,
                             current_stock,
                             visible_to_masters,
@@ -601,7 +603,7 @@ class Database:
                             created_at,
                             updated_at
                         )
-                    VALUES (?, ?, ?, ?, ?, ?, '0', ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, '0', ?, ?, ?, ?)
                     ON CONFLICT(sku) DO NOTHING
                     """,
                     (
@@ -610,6 +612,8 @@ class Database:
                         brand_ids[item["brand"]],
                         item["name"],
                         item["unit"],
+                        item.get("package_quantity"),
+                        item.get("purchase_price_per_package"),
                         item["purchase"],
                         int(bool(item["visible"])),
                         int(bool(item["needs_inventory"])),

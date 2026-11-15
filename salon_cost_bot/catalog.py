@@ -32,6 +32,8 @@ def _product(
     unit: str = "g",
     visible: bool | None = None,
     needs_inventory: bool = False,
+    package_quantity: str | None = None,
+    purchase_price_per_package: str | None = None,
 ) -> dict[str, object]:
     category_visibility = category in {
         "paint",
@@ -49,6 +51,8 @@ def _product(
         "name": name,
         "rate": rate,
         "purchase": purchase,
+        "package_quantity": package_quantity,
+        "purchase_price_per_package": purchase_price_per_package,
         "stock": stock,
         "unit": unit,
         "visible": category_visibility if visible is None else visible,
@@ -120,6 +124,10 @@ PRODUCTS: tuple[dict[str, object], ...] = (
     _product("corrector", "EPICA", "Anti-orange", "5.00", "5"),
     _product("powder", "Secta", "Порошок", "7.63", "3", stock="431"),
     _product(
+        "powder", "EPICA", "Порошок", "8.09", "3.40",
+        package_quantity="500", purchase_price_per_package="1700",
+    ),
+    _product(
         "acid_phase1", "Secta", "Фаза 1", "5.60", "2", stock="1340"
     ),
     _product(
@@ -164,6 +172,7 @@ BRAND_RATES: tuple[tuple[str, str, str], ...] = (
     ("corrector", "ESTEL", "1.80"),
     ("corrector", "EPICA", "5.00"),
     ("powder", "Secta", "7.63"),
+    ("powder", "EPICA", "8.09"),
     ("pigment", "Bad Girl", "6.51"),
     ("acid_phase1", "Secta", "5.60"),
     ("acid_phase2", "Secta", "5.60"),
